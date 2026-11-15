@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## v3.1.0 — 2026-11-15
+Fix round per MASTER-PROMPT.md: new tokens, logo and progress dots; 3-page opening with two-click snap scroll and a self-rotating Moon (Lenis/GSAP removed, 8k texture deleted, first-paint JS 83 kB gzip); simpler planner; alternatives return only fully suitable sites, searched over the whole 75° S map (owner asked for 2,000 km), guided by the Sun & Earth raster; English-only one-page A4 report; EN/AR string files with a parity test.
+Landing ellipse: the region where a lander is predicted to touch down given navigation and guidance uncertainty, described by two axes at a stated confidence (commonly 3-sigma).
+Default 100 m × 100 m follows the NASA Artemis human-lander requirement of landing within 100 m of the target; the engine treats it as axis-aligned (N–S length, E–W width). Arabic UI calls it «هامش الخطأ» (owner's request).
+
 ## v3.0.0-build1 — 2026-11-14 (builder)
 Phases 1–7 built; phase 8 partly verified (see report). Nothing pushed or deployed.
 
