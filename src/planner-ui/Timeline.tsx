@@ -1,31 +1,23 @@
 /**
- * Mission timeline like a video editor. Main bar: Sun and Earth rows at the chosen site (JPL Horizons + LOLA horizon)
- * over a zoomable span, with two draggable handles for landing and mission end. Overview bar underneath: the whole
- * loaded range (Nov 2026 – Dec 2035) with a draggable window for the visible span. Time always runs left → right.
+ * Multi-year timeline. Main bar: Sun and Earth rows at the chosen site (JPL Horizons + LOLA horizon) over a zoomable
+ * span, with two draggable handles for the mission start and end. Overview bar: the whole loaded range
+ * (Nov 2026 – Dec 2035) with a draggable window. Time always runs left → right, in both languages.
  */
 import { useMemo, useRef, useState, type PointerEvent as RPE } from 'react';
 import { azEl, discFractionVisible, sunRadiusDeg, type Ephemeris } from '../planner/ephemeris';
 import { horizonAt, type Horizon } from '../planner/horizon';
 import type { LatLon } from '../planner/polar';
-import { fmtDayTick, monthName } from '../state/format';
-import { useT, type Key } from '../state/i18n';
-import { usePlanner } from '../state/store';
+import { fmtDayMonth, fmtMonth, fmtYear, useT, type Key } from '../i18n';
+import { DAY, usePlanner } from '../state/store';
+import { Icon } from '../ui/Icon';
+import { useWidth } from './widgets';
 
-const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
 const SPANS: readonly { days: number; key: Key; cols: number; sub: number }[] = [
-  { days: 7, key: 'd7', cols: 168, sub: 1 },
-  { days: 30, key: 'd30', cols: 360, sub: 1 },
-  { days: 120, key: 'd120', cols: 480, sub: 2 },
-  { days: 365, key: 'y1', cols: 365, sub: 4 },
+  { days: 7, key: 'tl.week', cols: 168, sub: 1 },
+  { days: 30, key: 'tl.month', cols: 240, sub: 1 },
+  { days: 120, key: 'tl.months4', cols: 320, sub: 2 },
+  { days: 365, key: 'tl.year', cols: 365, sub: 3 },
 ];
-const NUDGE = 15 * DAY;
-
-interface Props {
-  readonly eph: Ephemeris;
-  readonly horizon: Horizon;
-  readonly site: LatLon;
-}
 
 function useRows(eph: Ephemeris, horizon: Horizon, site: LatLon, minEarth: number, t0: number, span: number, cols: number, sub: number) {
   return useMemo(() => {
@@ -47,21 +39,21 @@ function useRows(eph: Ephemeris, horizon: Horizon, site: LatLon, minEarth: numbe
   }, [eph, horizon, site, minEarth, t0, span, cols, sub]);
 }
 
-const sunColor = (v: number) => (v <= 0 ? '#0d1320' : `rgba(242,179,92,${0.25 + 0.75 * v})`);
-const earthColor = (v: number) => (v <= 0 ? '#0d1320' : `rgba(127,184,230,${0.25 + 0.75 * v})`);
+const NIGHT = '#151D2C';
+const sunColor = (v: number) => (v <= 0 ? NIGHT : `rgba(242,179,92,${0.3 + 0.7 * v})`);
+const earthColor = (v: number) => (v <= 0 ? NIGHT : `rgba(127,184,230,${0.3 + 0.7 * v})`);
 
-export function Timeline({ eph, horizon, site }: Props) {
+export function Timeline({ eph, horizon, site }: { eph: Ephemeris; horizon: Horizon; site: LatLon }) {
   const t = useT();
   const lang = usePlanner((s) => s.lang);
+  const tz = usePlanner((s) => s.tz);
   const startMs = usePlanner((s) => s.startMs);
   const endMs = usePlanner((s) => s.endMs);
   const minEarth = usePlanner((s) => s.limits.minEarthElDeg);
   const set = usePlanner((s) => s.set);
+  const [box, W] = useWidth<HTMLDivElement>();
   const missionDays = (endMs - startMs) / DAY;
-  const [spanIdx, setSpanIdx] = useState(() => {
-    const i = SPANS.findIndex((s) => s.days >= missionDays * 1.2);
-    return i === -1 ? SPANS.length - 1 : i;
-  });
+  const [spanIdx, setSpanIdx] = useState(() => { const i = SPANS.findIndex((s) => s.days >= missionDays * 1.2); return i === -1 ? SPANS.length - 1 : i; });
   const cfg = SPANS[spanIdx]!;
   const span = cfg.days * DAY;
   const [anchor, setAnchor] = useState<number | null>(null);
@@ -73,113 +65,111 @@ export function Timeline({ eph, horizon, site }: Props) {
 
   const rows = useRows(eph, horizon, site, minEarth, viewStart, span, cfg.cols, cfg.sub);
   const fullSpan = eph.endMs - eph.startMs;
-  const overview = useRows(eph, horizon, site, minEarth, eph.startMs, fullSpan, 500, 6);
+  const overview = useRows(eph, horizon, site, minEarth, eph.startMs, fullSpan, 400, 4);
 
-  const W = 1000, LH = 30, PAD = 70;
+  const LH = 30, PAD = lang === 'ar' ? 64 : 56;
   const x = (tm: number) => PAD + ((tm - viewStart) / span) * (W - PAD);
   const tAt = (px: number) => viewStart + ((px - PAD) / (W - PAD)) * span;
   const ox = (tm: number) => ((tm - eph.startMs) / fullSpan) * W;
   const otAt = (px: number) => eph.startMs + (px / W) * fullSpan;
 
-  const ticks = useMemo(() => {
-    const out: { x: number; label: string }[] = [];
-    const d0 = new Date(viewStart);
-    if (cfg.days === 365) {
-      for (let m = 0; m < 14; m++) {
-        const tm = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + m, 1);
-        if (tm >= viewStart && tm <= viewStart + span) out.push({ x: x(tm), label: `${monthName(new Date(tm).getUTCMonth(), lang)} ${new Date(tm).getUTCFullYear() % 100}` });
-      }
-    } else {
-      const every = cfg.days === 7 ? 1 : cfg.days === 30 ? 2 : 7;
-      for (let d = 0; d <= cfg.days; d += every) {
-        const tm = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth(), d0.getUTCDate() + 1 + d);
-        if (tm >= viewStart && tm <= viewStart + span) out.push({ x: x(tm), label: fmtDayTick(tm, 'utc', lang) });
-      }
+  const maxTicks = Math.max(2, Math.floor((W - PAD) / 84));
+  const ticks: { x: number; label: string }[] = [];
+  const d0 = new Date(viewStart);
+  if (cfg.days === 365) {
+    for (let m = 0; m < 14; m += Math.max(1, Math.ceil(12 / maxTicks))) {
+      const tm = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + m, 1);
+      if (tm >= viewStart && tm <= viewStart + span) ticks.push({ x: x(tm), label: fmtMonth(lang, tm, 'utc', false) });
     }
-    return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewStart, cfg.days, lang]);
+  } else {
+    const every = Math.max(1, Math.ceil(cfg.days / maxTicks));
+    for (let d = 0; d <= cfg.days; d += every) {
+      const tm = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth(), d0.getUTCDate() + 1 + d);
+      if (tm >= viewStart && tm <= viewStart + span) ticks.push({ x: x(tm), label: fmtDayMonth(lang, tm, tz) });
+    }
+  }
+  const years: { x: number; label: string }[] = [];
+  const yEvery = W < 520 ? 3 : 1;
+  for (let y = new Date(eph.startMs).getUTCFullYear() + 1; Date.UTC(y, 0, 1) < eph.endMs; y += yEvery) years.push({ x: ox(Date.UTC(y, 0, 1)), label: fmtYear(lang, Date.UTC(y, 6, 1)) });
 
-  const years = useMemo(() => {
-    const out: { x: number; y: number }[] = [];
-    for (let y = new Date(eph.startMs).getUTCFullYear() + 1; Date.UTC(y, 0, 1) < eph.endMs; y++) out.push({ x: ox(Date.UTC(y, 0, 1)), y });
-    return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eph]);
-
-  const snap = cfg.days <= 30 ? HOUR : DAY;
-  const pxOf = (svgEl: SVGSVGElement | null, e: RPE) => {
-    if (!svgEl) return 0;
-    const r = svgEl.getBoundingClientRect();
-    return ((e.clientX - r.left) / r.width) * W;
-  };
+  const snap = cfg.days <= 30 ? 3_600_000 : DAY;
+  const pxOf = (el: SVGSVGElement | null, e: RPE) => (el ? e.clientX - el.getBoundingClientRect().left : 0);
   const moveMain = (e: RPE) => {
     if (drag.current !== 'start' && drag.current !== 'end') return;
     const tm = Math.round(tAt(pxOf(main.current, e)) / snap) * snap;
     const c = Math.max(eph.startMs, Math.min(eph.endMs, tm));
-    if (drag.current === 'start') set({ startMs: Math.min(c, endMs - HOUR) });
-    else set({ endMs: Math.max(c, startMs + HOUR) });
+    if (drag.current === 'start') set({ startMs: Math.min(c, endMs - DAY) });
+    else set({ endMs: Math.max(c, startMs + DAY) });
   };
-  const moveOver = (e: RPE) => {
-    if (drag.current !== 'window') return;
-    setAnchor(otAt(pxOf(over.current, e)) - grab.current);
-  };
+  const moveOver = (e: RPE) => { if (drag.current === 'window') setAnchor(otAt(pxOf(over.current, e)) - grab.current); };
   const stop = () => { drag.current = null; };
+  const nudge = (k: number) => setAnchor(viewStart + k * span * 0.5);
 
   const xs = x(startMs), xe = x(endMs);
   const cw = (W - PAD) / cfg.cols;
   const ow = W / overview.sun.length;
-  const winX = ox(viewStart), winW = Math.max(6, ox(viewStart + span) - winX);
+  const winX = ox(viewStart), winW = Math.max(8, ox(viewStart + span) - winX);
+  const MH = LH * 2 + 44;
 
   return (
-    <div className="timeline" data-tour="timeline">
+    <div className="timeline">
       <div className="tl-head">
-        <div className="seg" role="group" aria-label={t('viewSpan')}>
-          {SPANS.map((s, i) => (
-            <button key={s.key} type="button" aria-pressed={cfg === s} className={cfg === s ? 'on' : ''} onClick={() => { setSpanIdx(i); setAnchor(null); }}>{t(s.key)}</button>
-          ))}
+        <div className="seg" role="group" aria-label={t('tl.span')}>
+          {SPANS.map((s, i) => <button key={s.key} type="button" aria-pressed={cfg === s} onClick={() => { setSpanIdx(i); setAnchor(null); }}>{t(s.key)}</button>)}
         </div>
         <div className="tl-nav" dir="ltr">
-          <button type="button" aria-label="−15" onClick={() => setAnchor(viewStart - NUDGE)}>‹</button>
-          <button type="button" aria-label="+15" onClick={() => setAnchor(viewStart + NUDGE)}>›</button>
-        </div>
-        <div className="tl-legend">
-          <span><i style={{ background: '#F2B35C' }} />{t('sunUp')}</span>
-          <span><i style={{ background: '#7FB8E6' }} />{t('earthUp')}</span>
-          <span><i style={{ background: '#0d1320', outline: '1px solid rgba(190,208,226,.2)' }} />{t('sunDown')} / {t('earthDown')}</span>
+          <button type="button" className="icon-btn" aria-label={t('tl.earlier')} onClick={() => nudge(-1)}><Icon name="arrow" className="flip" /></button>
+          <button type="button" className="icon-btn" aria-label={t('tl.later')} onClick={() => nudge(1)}><Icon name="arrow" /></button>
         </div>
       </div>
-      <svg ref={main} viewBox={`0 0 ${W} ${LH * 2 + 56}`} className="tl-svg" onPointerMove={moveMain} onPointerUp={stop} onPointerCancel={stop}>
-        <text x={PAD - 10} y={24} textAnchor="end" className="tl-row">{t('sun')}</text>
-        <text x={PAD - 10} y={24 + LH + 6} textAnchor="end" className="tl-row">{t('earth')}</text>
-        {Array.from(rows.sun, (v, c) => <rect key={`s${c}`} x={PAD + c * cw} y={8} width={cw + 0.3} height={LH - 4} fill={sunColor(v)} />)}
-        {Array.from(rows.earth, (v, c) => <rect key={`e${c}`} x={PAD + c * cw} y={8 + LH + 6} width={cw + 0.3} height={LH - 4} fill={earthColor(v)} />)}
-        <rect x={Math.max(PAD, xs)} y={2} width={Math.max(0, Math.min(W, xe) - Math.max(PAD, xs))} height={LH * 2 + 14} className="tl-range" />
-        {ticks.map((k) => <g key={k.x}><line x1={k.x} x2={k.x} y1={LH * 2 + 16} y2={LH * 2 + 22} className="tl-tick" /><text x={k.x} y={LH * 2 + 36} textAnchor="middle" className="tl-tl">{k.label}</text></g>)}
-        {([['start', xs], ['end', xe]] as const).map(([which, px]) => (px >= PAD - 1 && px <= W + 1 ? (
-          <g key={which} className="tl-handle" onPointerDown={(e) => { drag.current = which; main.current?.setPointerCapture?.(e.pointerId); }}>
-            <rect x={px - 14} y={0} width={28} height={LH * 2 + 16} fill="transparent" />
-            <line x1={px} x2={px} y1={0} y2={LH * 2 + 16} />
-            <rect x={px - 9} y={LH - 6} width={18} height={26} rx={6} />
-          </g>
-        ) : null))}
-      </svg>
-      <svg ref={over} viewBox={`0 0 ${W} 46`} className="tl-over" data-tour="overview" onPointerMove={moveOver} onPointerUp={stop} onPointerCancel={stop}
-        onPointerDown={(e) => {
-          const px = pxOf(over.current, e);
-          drag.current = 'window';
-          grab.current = px >= winX && px <= winX + winW ? otAt(px) - viewStart : span / 2;
-          if (!(px >= winX && px <= winX + winW)) setAnchor(otAt(px) - span / 2);
-          over.current?.setPointerCapture?.(e.pointerId);
-        }}>
-        {Array.from(overview.sun, (v, c) => <rect key={`os${c}`} x={c * ow} y={4} width={ow + 0.3} height={12} fill={sunColor(v)} />)}
-        {Array.from(overview.earth, (v, c) => <rect key={`oe${c}`} x={c * ow} y={18} width={ow + 0.3} height={12} fill={earthColor(v)} />)}
-        <rect x={ox(startMs)} y={2} width={Math.max(2, ox(endMs) - ox(startMs))} height={30} className="tl-o-mission" />
-        <rect x={winX} y={0} width={winW} height={34} rx={5} className="tl-o-window" />
-        {years.map((y) => <g key={y.y}><line x1={y.x} x2={y.x} y1={32} y2={37} className="tl-tick" /><text x={y.x} y={45} textAnchor="middle" className="tl-tl">{y.y}</text></g>)}
-      </svg>
-      <div className="tl-foot">
-        <span className="muted">{t('dragHint')}</span>
+      <div ref={box} className="tl-box" dir="ltr">
+        {W > 0 ? (
+          <>
+            <svg ref={main} width={W} height={MH} className="tl-svg" onPointerMove={moveMain} onPointerUp={stop} onPointerCancel={stop}>
+              <text x={PAD - 10} y={26} textAnchor="end" className="tl-row">{t('tl.sun')}</text>
+              <text x={PAD - 10} y={26 + LH + 4} textAnchor="end" className="tl-row">{t('tl.earth')}</text>
+              {Array.from(rows.sun, (v, c) => <rect key={`s${c}`} x={PAD + c * cw} y={8} width={cw + 0.4} height={LH - 4} fill={sunColor(v)} />)}
+              {Array.from(rows.earth, (v, c) => <rect key={`e${c}`} x={PAD + c * cw} y={8 + LH + 4} width={cw + 0.4} height={LH - 4} fill={earthColor(v)} />)}
+              <rect x={Math.max(PAD, xs)} y={3} width={Math.max(0, Math.min(W, xe) - Math.max(PAD, xs))} height={LH * 2 + 10} className="tl-range" />
+              {ticks.map((k) => <text key={k.x} x={k.x} y={MH - 8} textAnchor="middle" className="tick">{k.label}</text>)}
+              {([['start', xs, 'tl.start'], ['end', xe, 'tl.end']] as const).map(([which, px, label]) => (px >= PAD - 1 && px <= W + 1 ? (
+                <g key={which} className="tl-handle" role="slider" aria-label={t(label)} aria-valuetext={fmtDayMonth(lang, which === 'start' ? startMs : endMs, tz)} tabIndex={0}
+                  onKeyDown={(e) => {
+                    const k = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+                    if (!k) return;
+                    e.preventDefault();
+                    if (which === 'start') set({ startMs: Math.min(endMs - DAY, Math.max(eph.startMs, startMs + k * DAY)) });
+                    else set({ endMs: Math.max(startMs + DAY, Math.min(eph.endMs, endMs + k * DAY)) });
+                  }}
+                  onPointerDown={(e) => { drag.current = which; main.current?.setPointerCapture?.(e.pointerId); }}>
+                  <rect x={px - 16} y={0} width={32} height={LH * 2 + 16} fill="transparent" />
+                  <line x1={px} x2={px} y1={0} y2={LH * 2 + 16} />
+                  <rect x={px - 7} y={LH - 8} width={14} height={28} rx={7} />
+                </g>
+              ) : null))}
+            </svg>
+            <svg ref={over} width={W} height={56} className="tl-over" onPointerMove={moveOver} onPointerUp={stop} onPointerCancel={stop}
+              onPointerDown={(e) => {
+                const px = pxOf(over.current, e);
+                drag.current = 'window';
+                const inside = px >= winX && px <= winX + winW;
+                grab.current = inside ? otAt(px) - viewStart : span / 2;
+                if (!inside) setAnchor(otAt(px) - span / 2);
+                over.current?.setPointerCapture?.(e.pointerId);
+              }}>
+              {Array.from(overview.sun, (v, c) => <rect key={`os${c}`} x={c * ow} y={4} width={ow + 0.4} height={11} fill={sunColor(v)} />)}
+              {Array.from(overview.earth, (v, c) => <rect key={`oe${c}`} x={c * ow} y={17} width={ow + 0.4} height={11} fill={earthColor(v)} />)}
+              <rect x={ox(startMs)} y={2} width={Math.max(2, ox(endMs) - ox(startMs))} height={28} className="tl-o-mission" />
+              <rect x={winX} y={0.5} width={winW} height={31} rx={6} className="tl-o-window" />
+              {years.map((y) => <text key={y.label} x={y.x} y={52} textAnchor="middle" className="tick">{y.label}</text>)}
+            </svg>
+          </>
+        ) : null}
+      </div>
+      <div className="tl-legend">
+        <span><i className="sw sun" />{t('tl.sunUp')}</span>
+        <span><i className="sw earth" />{t('tl.earthUp')}</span>
+        <span><i className="sw night" />{t('tl.neither')}</span>
       </div>
     </div>
   );

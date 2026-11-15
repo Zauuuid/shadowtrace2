@@ -1,8 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import '@fontsource-variable/manrope';
-import '@fontsource-variable/jetbrains-mono';
-import '@fontsource/ibm-plex-sans-arabic/arabic-200.css';
+import '@fontsource-variable/manrope/wght.css';
 import '@fontsource/ibm-plex-sans-arabic/arabic-300.css';
 import '@fontsource/ibm-plex-sans-arabic/arabic-400.css';
 import '@fontsource/ibm-plex-sans-arabic/arabic-500.css';

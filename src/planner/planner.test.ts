@@ -39,6 +39,7 @@ function fakeTerrain(origin: XY, f: (eM: number, nM: number) => number): PolarTe
 const SC: Spacecraft = { arrayAreaM2: 1.8, arrayEff: 0.196, batteryWh: 2320, usableFrac: 0.85, dayLoadW: 150, nightLoadW: 100, panel: 'tracking', fixedAzDeg: 0, mastM: 2 };
 const LIM: Limits = { minEarthElDeg: 0, maxBlackoutH: 72, minContactHPerDay: 0, maxSlopeDeg: 10, legSpanM: 4 };
 const SITE_A = { lat: -89.445, lon: -138.468 };
+const DISP = { northM: 50, eastM: 50, southM: 50, westM: 50 };
 
 describe('polar projection', () => {
   it('round-trips and puts lon 0 on +y, lon 90E on +x', () => {
@@ -237,7 +238,7 @@ describe('v2 review fixes', () => {
     const ctl = new AbortController();
     setTimeout(() => ctl.abort(), 30);
     const t0 = performance.now();
-    await searchSites(eph, flat, SITE_A, 10, Date.parse('2027-01-01T00:00:00Z'), Date.parse('2028-06-01T00:00:00Z'), hungry, LIM, 5, ctl.signal);
+    await searchSites(eph, flat, SITE_A, 10, Date.parse('2027-01-01T00:00:00Z'), Date.parse('2028-06-01T00:00:00Z'), hungry, LIM, { dispersion: DISP, want: 5, signal: ctl.signal });
     expect(performance.now() - t0).toBeLessThan(1500);
   });
   it('simulation step grows with mission length', async () => {
@@ -271,14 +272,6 @@ describe('v2.1 feedback', () => {
     const before = r.t.findIndex((x) => x >= run.startMs) - 1;
     if (before >= 0) expect(r.sunFrac[before]).toBeGreaterThan(0);
   });
-  it('site search always returns suggestions, marking the ones that still fail', async () => {
-    const { searchSites } = await import('./alternatives');
-    const hungry: Spacecraft = { ...SC, nightLoadW: 5000, batteryWh: 100 };
-    const r = await searchSites(eph, fakeTerrain(o, () => 0), SITE_A, 5, Date.parse('2027-05-01T00:00:00Z'), Date.parse('2027-05-20T00:00:00Z'), hungry, LIM, 5);
-    expect(r).toHaveLength(5);
-    expect(r.every((x) => !x.passes && x.reasons.length > 0)).toBe(true);
-    for (let i = 1; i < r.length; i++) expect(r[i]!.score).toBeGreaterThanOrEqual(r[i - 1]!.score);
-    }, 60_000);
   it('major events keep only long outages and battery events', async () => {
     const { majorEvents } = await import('./mission');
     const r = simulate(eph, flatHz(), SITE_A, Date.parse('2027-01-01T00:00:00Z'), Date.parse('2027-04-01T00:00:00Z'), SC, LIM);
@@ -291,13 +284,15 @@ describe('v2.1 feedback', () => {
 });
 
 describe('100 km automatic search', () => {
-  it('search rings are dense near the site and sparse far away, ending at 100 km', async () => {
+  it('search rings are dense near the site and sparse far away, covering the whole 75°S cap', async () => {
     const { searchRings, ALT_RADIUS_KM } = await import('./alternatives');
-    expect(ALT_RADIUS_KM).toBe(100);
+    expect(ALT_RADIUS_KM).toBe(2000);
     const r = searchRings(ALT_RADIUS_KM);
     expect(r[0]).toBe(0.5);
-    expect(r[r.length - 1]).toBe(100);
-    expect(r.length).toBeLessThanOrEqual(16);
+    // the farthest covered point from any covered site is < 2 × 460 km (pole to 75°S)
+    expect(r[r.length - 1]).toBeGreaterThanOrEqual(920);
+    expect(searchRings(100).at(-1)).toBe(100);
+    expect(r.length).toBeLessThanOrEqual(32);
     for (let i = 1; i < r.length; i++) expect(r[i]! - r[i - 1]!).toBeGreaterThanOrEqual(r[i - 1]! - (r[i - 2] ?? 0) - 1e-9);
   });
   it('reports partial results while searching', async () => {
@@ -305,7 +300,7 @@ describe('100 km automatic search', () => {
     const o = toXY(SITE_A);
     const hungry: Spacecraft = { ...SC, nightLoadW: 5000, batteryWh: 100 };
     let calls = 0;
-    await searchSites(eph, fakeTerrain(o, () => 0), SITE_A, 2, Date.parse('2027-05-01T00:00:00Z'), Date.parse('2027-05-08T00:00:00Z'), hungry, LIM, 3, undefined, () => { calls++; });
+    await searchSites(eph, fakeTerrain(o, () => 0), SITE_A, 2, Date.parse('2027-05-01T00:00:00Z'), Date.parse('2027-05-08T00:00:00Z'), hungry, LIM, { dispersion: DISP, want: 3, onProgress: () => { calls++; } });
     expect(calls).toBeGreaterThan(1);
   }, 60_000);
 });
@@ -343,5 +338,54 @@ describe('highest point of a region', () => {
     const top = highestPoint(t, ring, 250);
     const d = Math.hypot(top.x - p(3000, 0)[0]!, top.y - p(3000, 0)[1]!);
     expect(d).toBeLessThan(400);
+  });
+});
+
+describe('alternative sites (MASTER-PROMPT §8): only fully suitable sites', () => {
+  const o = toXY(SITE_A);
+  // A 20° cone around the chosen site, flat beyond 300 m: the origin fails on slope only.
+  const cone = () => fakeTerrain(o, (e, n) => Math.min(Math.hypot(e, n), 300) * Math.tan((20 * Math.PI) / 180));
+  const big: Spacecraft = { ...SC, batteryWh: 500_000 };
+  const easy: Limits = { ...LIM, maxBlackoutH: 100_000 };
+  const A = Date.parse('2027-01-20T00:00:00Z'), B = Date.parse('2027-01-27T00:00:00Z');
+
+  it('returns only suitable results, nearest first', async () => {
+    const { searchSites, checkSite } = await import('./alternatives');
+    const t = cone();
+    const r = await searchSites(eph, t, SITE_A, 2, A, B, big, easy, { dispersion: DISP, want: 3 });
+    expect(r.reason).toBeNull();
+    expect(r.sites).toHaveLength(3);
+    for (let i = 1; i < r.sites.length; i++) expect(r.sites[i]!.distanceM).toBeGreaterThanOrEqual(r.sites[i - 1]!.distanceM);
+    for (const x of r.sites) {
+      const c = checkSite(eph, t, toXY(x.site), A, B, big, easy, DISP, 1, 10);
+      expect(c).not.toBeNull();
+      expect(c!.reasons).toEqual([]);
+    }
+  }, 60_000);
+
+  it('a result never has the same failing check as the origin unless it actually passes', async () => {
+    const { searchSites, checkSite } = await import('./alternatives');
+    const t = cone();
+    const origin = checkSite(eph, t, o, A, B, big, easy, DISP, 1, 10)!;
+    expect(origin.reasons.map((x) => x.code)).toEqual(['slope']);
+    const r = await searchSites(eph, t, SITE_A, 2, A, B, big, easy, { dispersion: DISP, want: 3 });
+    for (const x of r.sites) {
+      const codes = checkSite(eph, t, toXY(x.site), A, B, big, easy, DISP, 1, 10)!.reasons.map((y) => y.code);
+      for (const fail of origin.reasons) expect(codes).not.toContain(fail.code);
+    }
+  }, 60_000);
+
+  it('returns [] with the dominant reason when nothing within the radius passes', async () => {
+    const { searchSites } = await import('./alternatives');
+    const hungry: Spacecraft = { ...SC, nightLoadW: 5000, batteryWh: 100 };
+    const r = await searchSites(eph, fakeTerrain(o, () => 0), SITE_A, 2, Date.parse('2027-05-01T00:00:00Z'), Date.parse('2027-05-20T00:00:00Z'), hungry, easy, { dispersion: DISP });
+    expect(r.sites).toEqual([]);
+    expect(r.reason).toBe('battery');
+  }, 60_000);
+
+  it('candidates rejected by the screening raster are never simulated; the reason is then the light', async () => {
+    const { searchSites } = await import('./alternatives');
+    const r = await searchSites(eph, fakeTerrain(o, () => 0), SITE_A, 2, A, B, big, easy, { dispersion: DISP, screen: () => false });
+    expect(r).toEqual({ sites: [], reason: 'light' });
   });
 });

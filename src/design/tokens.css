@@ -1,23 +1,33 @@
-/* Chapter 06 §2 — "Graphite, ice and long shadows". The only place colours are defined. */
+/* The only place colours, type sizes, radii and spacing are defined (MASTER-PROMPT §3). */
 :root {
-  --bg-0: #05070B; --bg-1: #0A0F18; --bg-2: #111826;
-  --glass: rgba(12, 18, 30, .55);
-  --line: rgba(190, 208, 226, .14); --line-strong: rgba(190, 208, 226, .28);
-  --text: #E8EDF2; --muted: #8D99A8; --dust: #CFC8BC;
-  --ice: #9FD8E8; --ice-dim: #5E9AAB; --ice-glow: rgba(159, 216, 232, .35);
-  --sun: #F2B35C; --earth: #7FB8E6;
-  --ok: #6FD3A0; --warn: #E8B65A; --bad: #E5707A; --nodata: #7D8794;
-  --ok-bg: rgba(111, 211, 160, .10); --warn-bg: rgba(232, 182, 90, .10); --bad-bg: rgba(229, 112, 122, .10);
-  --paper: #F2EFE8; --ink: #161A22; --paper-muted: #6B6A64;
+  --bg: #070A10;
+  --surface: #0E1420;
+  --surface-2: #151D2C;
+  --text: #F2F5F8;
+  --text-2: #C3CDD9;
+  --accent: #8FD3E6;
+  --ok: #6FD3A0;
+  --warn: #E8B65A;
+  --bad: #E5707A;
+  --nodata: #9AA6B4;
+  --sun: #F2B35C;
+  --earth: #7FB8E6;
 
-  --ease-out: cubic-bezier(.22, 1, .36, 1); --ease-io: cubic-bezier(.65, .05, .2, 1);
-  --d-micro: 120ms; --d-ui: 280ms; --d-panel: 600ms; --d-text: 900ms;
+  --t-display: clamp(44px, 7vw, 88px);
+  --t-title: clamp(26px, 3vw, 36px);
+  --t-body: 17px;
+  --t-small: 14px;
 
-  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px; --s8: 72px; --s9: 112px; --s10: 160px;
-  --r-line: 2px; --r-in: 10px; --r-pill: 999px;
+  --r: 14px;
+  --r-pill: 999px;
+  --s1: 8px; --s2: 16px; --s3: 24px; --s4: 40px; --s5: 64px;
+
+  --field-h: 52px;
+  --nav-h: 64px;
+  --dots-h: 28px;
+  --gutter: max(16px, min(5vw, 64px));
+  --ease: cubic-bezier(.65, .05, .25, 1);
 
   --f-sans: 'Manrope Variable', 'IBM Plex Sans Arabic', system-ui, sans-serif;
-  --f-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
-  --gutter: clamp(20px, 5vw, 96px);
 }
-:root[lang='ar'] { --f-sans: 'IBM Plex Sans Arabic', 'Manrope Variable', system-ui, sans-serif; --f-mono: 'JetBrains Mono Variable', 'IBM Plex Sans Arabic', ui-monospace, monospace; }
+:root[lang='ar'] { --f-sans: 'IBM Plex Sans Arabic', 'Manrope Variable', system-ui, sans-serif; }

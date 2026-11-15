@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { fmtDayTick } from './format';
 import { clamp, parseNumber } from './number';
 import { outageRows } from './outages';
 
@@ -37,24 +36,6 @@ describe('outage rows', () => {
   });
 });
 
-describe('day ticks', () => {
-  it('formats a day and month', () => {
-    expect(fmtDayTick(Date.parse('2027-03-05T00:00Z'), 'utc', 'ar')).toBe('5 مارس');
-    expect(fmtDayTick(Date.parse('2027-03-04T22:00Z'), 'ksa', 'en')).toBe('5 Mar');
-  });
-});
-
-describe('battery colour', () => {
-  it('compares battery hours with the longest darkness', async () => {
-    const { batteryTone } = await import('./tones');
-    expect(batteryTone(20, null)).toBe('nodata');
-    expect(batteryTone(20, 0)).toBe('good');
-    expect(batteryTone(25, 20)).toBe('good');
-    expect(batteryTone(20, 20)).toBe('warn');
-    expect(batteryTone(19.7, 93)).toBe('bad');
-  });
-});
-
 describe('chart tick spacing', () => {
   it('picks days, weeks, months or years by length', async () => {
     const { tickPlan } = await import('./format');
@@ -78,12 +59,15 @@ describe('site status (no slope)', () => {
 });
 
 describe('language on first open', () => {
-  it('is English unless the user chose Arabic in this version', async () => {
-    const { pickLang, LANG_KEY } = await import('./lang');
+  it('route first, then the saved choice, then the browser language, else English', async () => {
+    const { pickLang, routeLang, LANG_KEY } = await import('./lang');
     expect(LANG_KEY).not.toBe('st-lang');
-    expect(pickLang(null)).toBe('en');
-    expect(pickLang('garbage')).toBe('en');
-    expect(pickLang('ar')).toBe('ar');
-    expect(pickLang('en')).toBe('en');
+    expect(pickLang('ar', 'en', ['en-US'])).toBe('ar');
+    expect(pickLang(null, 'en', ['ar-SA'])).toBe('en');
+    expect(pickLang(null, null, ['ar-SA', 'en'])).toBe('ar');
+    expect(pickLang(null, 'garbage', ['fr-FR'])).toBe('en');
+    expect(pickLang(null, null, [])).toBe('en');
+    expect(routeLang('#/ar')).toBe('ar');
+    expect(routeLang('#m=abc')).toBeNull();
   });
 });

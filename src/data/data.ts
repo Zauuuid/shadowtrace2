@@ -19,10 +19,6 @@ export interface NamedFeature {
   readonly diameterKm: number;
   readonly kind: string;
 }
-export interface VectorLayers {
-  readonly artemis3: { readonly features: readonly { label: string; rings: number[][][] }[] };
-  readonly psr: { readonly features: readonly { label: string; point: [number, number]; areaKm2: number; feature: string }[] };
-}
 export interface SuitMeta {
   readonly extentM: number;
   readonly sizePx: number;
@@ -35,26 +31,26 @@ export interface PlannerData {
   readonly suit: SuitMeta | null;
   readonly terrain: PolarTerrain;
   readonly names: readonly NamedFeature[];
-  readonly vectors: VectorLayers;
 }
 
 let cache: Promise<PlannerData> | null = null;
+let ephBytes: Promise<ArrayBuffer> | null = null;
 let ephCache: Promise<EphemerisFile> | null = null;
 
-/** The ephemeris alone (the Journey needs it for its lighting before the terrain has loaded). */
-export function loadEphemerisFile(): Promise<EphemerisFile> {
-  ephCache ??= fetch(`${BASE}data/ephemeris.json`).then((r) => {
-    if (!r.ok) { ephCache = null; throw new Error(`ephemeris.json: ${r.status}`); }
-    return r.json() as Promise<EphemerisFile>;
+/** Download the ephemeris without parsing it (idle prefetch on the opening pages: no long task there). */
+export function prefetchEphemeris(): Promise<ArrayBuffer> {
+  ephBytes ??= fetch(`${BASE}data/ephemeris.json`).then((r) => {
+    if (!r.ok) { ephBytes = null; throw new Error(`ephemeris.json: ${r.status}`); }
+    return r.arrayBuffer();
   });
-  return ephCache;
+  return ephBytes;
 }
 
-export interface SourceEntry { readonly id: string; readonly name: string; readonly url: string; readonly period?: string; readonly resolution?: string; readonly usedFor: readonly string[]; readonly scientific: boolean; readonly note?: string; readonly credit?: string }
-let srcCache: Promise<readonly SourceEntry[]> | null = null;
-export function loadSources(): Promise<readonly SourceEntry[]> {
-  srcCache ??= fetch(`${BASE}data/SOURCES.json`).then((r) => (r.ok ? r.json() : { sources: [] })).then((j: { sources: SourceEntry[] }) => j.sources, () => []);
-  return srcCache;
+/** The parsed ephemeris (when the planner needs it). */
+export function loadEphemerisFile(): Promise<EphemerisFile> {
+  ephCache ??= prefetchEphemeris().then((b) => JSON.parse(new TextDecoder().decode(b)) as EphemerisFile);
+  ephCache.catch(() => { ephCache = null; });
+  return ephCache;
 }
 
 /** Forget a failed load so the UI can retry. */
@@ -84,10 +80,11 @@ export function loadPlannerData(): Promise<PlannerData> {
         return new Int16Array(raw);
       },
     });
-    const [ephFile, namesFile, vectors, , suit] = await Promise.all([
-      loadEphemerisFile(),
+    // Ephemeris first: it is the file the result needs most and it may already be cached by the idle prefetch.
+    const eph = loadEphemerisFile();
+    const [ephFile, namesFile, , suit] = await Promise.all([
+      eph,
       json('lunar_names.json') as Promise<{ features: [string, number, number, number, string][] }>,
-      json('moontrek_vectors.json') as Promise<VectorLayers>,
       terrain.init(),
       (json('suit/meta.json') as Promise<SuitMeta>).catch(() => null),
     ]);
@@ -95,7 +92,6 @@ export function loadPlannerData(): Promise<PlannerData> {
       eph: makeEphemeris(ephFile),
       suit,
       terrain,
-      vectors,
       names: namesFile.features.map(([name, lat, lon, diameterKm, kind]) => ({ name, lat, lon, diameterKm, kind })),
     };
   })();

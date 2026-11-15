@@ -1,0 +1,22 @@
+/** Mission report text. The report is an official document and is always in English (MASTER-PROMPT §10). */
+export const REPORT = {
+  title: 'Mission report',
+  generated: 'Generated {d}',
+  site: 'Landing site',
+  nearest: 'Nearest named feature',
+  nearestValue: '{name}, {d} {dir}',
+  dates: 'Mission dates',
+  datesValue: '{a} to {b} ({n})',
+  craft: 'Spacecraft',
+  craftValue: 'Battery {b} Wh; solar panels {a} m² at {e}% efficiency',
+  ellipse: 'Landing ellipse',
+  ellipseValue: '{l} m north–south × {w} m east–west',
+  verdict: 'Verdict',
+  sun: 'Sun hidden (longest three)',
+  earth: 'Earth contact lost (longest three)',
+  none: 'None during the mission',
+  range: '{a} to {b} ({n})',
+  sources: 'Data sources',
+  sourcesValue: 'NASA JPL Horizons; NASA PDS LRO LOLA; NASA Moon Trek; IAU / USGS Gazetteer of Planetary Nomenclature',
+  pending: 'Not computed',
+} as const;

@@ -1,153 +1,184 @@
 /**
- * South-pole map built directly on NASA Moon Trek WMTS tiles (south polar stereographic, the same projection as
- * src/planner/polar.ts). No mapping library: tiles are <img> elements, overlays are SVG in screen space.
+ * South-pole map on NASA Moon Trek WMTS tiles (south polar stereographic, the projection of src/planner/polar.ts).
+ * No mapping library: tiles are <img>/<canvas>, overlays are SVG in screen space.
+ *
+ * Sharpness: the tile level is chosen from the device pixel ratio, so a tile's native resolution is at least the
+ * screen's (up to WAC z4 and NAC z12, the highest levels Moon Trek serves). The level below is drawn underneath while
+ * the sharp tiles load, and tiles fade in. Where NAC has no data (opaque black) it is made transparent; zoomed in, a
+ * NASA LOLA hillshade (40 m near the pole, 240 m elsewhere) sits under NAC instead of a stretched WAC image.
  */
-import { useEffect, useMemo, useRef, useState, type PointerEvent as RPE } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as RPE } from 'react';
+import type { PlannerData } from '../data/data';
 import { radiusTowards, type Dispersion } from '../planner/landing';
 import { offset, toLatLon, toXY, type LatLon, type XY } from '../planner/polar';
-import type { PlannerData } from '../data/data';
-import { monthName } from '../state/format';
-import { useT } from '../state/i18n';
+import { fmtKm, useT } from '../i18n';
 import { usePlanner } from '../state/store';
+import { Icon } from '../ui/Icon';
 
 const TREK = 'https://trek.nasa.gov/tiles/Moon/SP';
 const DATA = `${import.meta.env.BASE_URL}data/`;
 const ORIGIN = 1_095_930;
 const RES0 = (2 * ORIGIN) / 256;
+const MIN_RES = 0.6;
+const MAX_RES = 2000;
 
-interface TileLayer {
-  readonly id: string;
-  readonly maxZ: number;
-  readonly extentM: number;
-  readonly recolor?: boolean;
-  readonly opacity?: number;
-}
-const BASE: TileLayer = { id: 'LRO_WAC_Mosaic_SPole60_100mp', maxZ: 4, extentM: 931_100 };
-const NAC: TileLayer = { id: 'LRO_NAC_Mosaic_1mpp_SP', maxZ: 12, extentM: 136_700, recolor: true };
-const EARTH: TileLayer = { id: 'AVGVISIB_85S_060M_201608_EARTH_SP', maxZ: 6, extentM: 151_740, recolor: true, opacity: 0.6 };
-const PSR_TILES: TileLayer = { id: 'LRO_LOLA_Illumination_SPole65S_240m', maxZ: 3, extentM: 770_160, recolor: true, opacity: 0.7 };
+interface TileLayer { readonly id: string; readonly maxZ: number; readonly extentM: number; readonly cut?: boolean }
+const WAC: TileLayer = { id: 'LRO_WAC_Mosaic_SPole60_100mp', maxZ: 4, extentM: 931_100 };
+const NAC: TileLayer = { id: 'LRO_NAC_Mosaic_1mpp_SP', maxZ: 12, extentM: 136_700, cut: true };
 
-export interface MapMarker {
-  readonly id: string;
-  readonly at: LatLon;
-  readonly label: string;
-  readonly tone: 'good' | 'bad' | 'info';
-  readonly onClick?: () => void;
-}
+interface View { c: XY; res: number }
 
-interface Props {
-  readonly data: PlannerData;
-  readonly site: LatLon;
-  readonly onPick?: (p: LatLon) => void;
-  readonly dispersion?: Dispersion;
-  readonly highlight?: readonly string[];
-  readonly markers?: readonly MapMarker[];
-  readonly suggestion?: XY | null;
-  readonly height?: number;
-  readonly showLegend?: boolean;
-  /** "YYYY-MM": month of the landing-suitability layer to draw. */
-  readonly suitMonth?: string;
-  readonly initialRes?: number;
-  readonly tour?: string;
+function Tile({ src, style, cut }: { src: string; style: CSSProperties; cut?: boolean }) {
+  const [on, setOn] = useState(false);
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    if (!cut) return;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    let alive = true;
+    img.onload = () => {
+      const cv = ref.current;
+      const g = cv?.getContext('2d', { willReadFrequently: true });
+      if (!alive || !cv || !g) return;
+      g.drawImage(img, 0, 0, 256, 256);
+      const d = g.getImageData(0, 0, 256, 256);
+      const p = d.data;
+      for (let i = 0; i < p.length; i += 4) if (p[i]! < 3 && p[i + 1]! < 3 && p[i + 2]! < 3) p[i + 3] = 0;
+      g.putImageData(d, 0, 0);
+      setOn(true);
+    };
+    img.src = src;
+    return () => { alive = false; };
+  }, [src, cut]);
+  if (cut) return <canvas ref={ref} className={on ? 'tile in' : 'tile'} width={256} height={256} style={style} />;
+  return <img className={on ? 'tile in' : 'tile'} src={src} alt="" draggable={false} style={style} onLoad={() => setOn(true)} onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }} />;
 }
 
-function Tiles({ layer, z, view, w, h }: { layer: TileLayer; z: number; view: { c: XY; res: number }; w: number; h: number }) {
-  const zz = Math.min(z, layer.maxZ);
-  const rz = RES0 / 2 ** zz;
-  const span = 256 * rz;
+function Tiles({ layer, z, view, w, h, pad }: { layer: TileLayer; z: number; view: View; w: number; h: number; pad: number }) {
+  const zz = Math.max(0, Math.min(z, layer.maxZ));
+  const span = 256 * (RES0 / 2 ** zz);
   const x0 = view.c.x - (w / 2) * view.res, x1 = view.c.x + (w / 2) * view.res;
   const y0 = view.c.y - (h / 2) * view.res, y1 = view.c.y + (h / 2) * view.res;
-  const c0 = Math.floor((Math.max(x0, -layer.extentM) + ORIGIN) / span);
-  const c1 = Math.floor((Math.min(x1, layer.extentM) + ORIGIN) / span);
-  const r0 = Math.floor((ORIGIN - Math.min(y1, layer.extentM)) / span);
-  const r1 = Math.floor((ORIGIN - Math.max(y0, -layer.extentM)) / span);
+  const c0 = Math.floor((Math.max(x0, -layer.extentM) + ORIGIN) / span) - pad;
+  const c1 = Math.floor((Math.min(x1, layer.extentM) + ORIGIN) / span) + pad;
+  const r0 = Math.floor((ORIGIN - Math.min(y1, layer.extentM)) / span) - pad;
+  const r1 = Math.floor((ORIGIN - Math.max(y0, -layer.extentM)) / span) + pad;
+  const n = 2 ** zz;
   const size = span / view.res;
   const out = [];
-  for (let r = Math.max(0, r0); r <= r1; r++) {
-    for (let c = Math.max(0, c0); c <= c1; c++) {
+  for (let r = Math.max(0, r0); r <= Math.min(n - 1, r1); r++) {
+    for (let c = Math.max(0, c0); c <= Math.min(n - 1, c1); c++) {
       const left = (-ORIGIN + c * span - x0) / view.res;
       const top = (y1 - (ORIGIN - r * span)) / view.res;
       const src = `${TREK}/${layer.id}/1.0.0//default/default028mm/${zz}/${r}/${c}.png`;
-      const style = { left, top, width: size + 0.5, height: size + 0.5, opacity: layer.opacity ?? 1 };
-      out.push(layer.recolor
-        ? <RecolorTile key={`${zz}/${r}/${c}`} src={src} style={style} mode={layer === PSR_TILES ? 'psr' : layer === NAC ? 'cut' : 'heat'} />
-        : <img key={`${zz}/${r}/${c}`} className="tile" src={src} alt="" draggable={false} style={style} onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }} />);
+      out.push(<Tile key={`${layer.id}/${zz}/${r}/${c}`} src={src} cut={layer.cut} style={{ left, top, width: size + 0.5, height: size + 0.5 }} />);
     }
   }
   return <>{out}</>;
 }
 
-/** NASA grey-scale layers recoloured like a weather map: red = little, green = a lot. */
-function RecolorTile({ src, style, mode }: { src: string; style: React.CSSProperties; mode: 'psr' | 'heat' | 'cut' }) {
-  const psr = mode === 'psr';
+/** NASA LOLA hillshade of the view, under NAC: a sharp relief where no image covers the ground. */
+function Hillshade({ data, view, w, h }: { data: PlannerData; view: View; w: number; h: number }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
+    const id = setTimeout(() => {
       const cv = ref.current;
-      if (!cv) return;
-      const g = cv.getContext('2d', { willReadFrequently: true });
-      if (!g) return;
-      g.drawImage(img, 0, 0, 256, 256);
-      const d = g.getImageData(0, 0, 256, 256);
-      const p = d.data;
-      for (let i = 0; i < p.length; i += 4) {
-        const v = p[i]! / 255;
-        const a = p[i + 3]!;
-        if (mode === 'cut') { if (p[i] === 0 && p[i + 1] === 0 && p[i + 2] === 0) p[i + 3] = 0; continue; }
-        if (a === 0 || (psr && v < 0.5)) { p[i + 3] = 0; continue; }
-        if (psr) { p[i] = 235; p[i + 1] = 70; p[i + 2] = 70; p[i + 3] = 200; continue; }
-        // red (0) -> amber (0.5) -> green (1)
-        const r = v < 0.5 ? 232 : Math.round(232 - (v - 0.5) * 2 * 150);
-        const gg = v < 0.5 ? Math.round(80 + v * 2 * 110) : Math.round(190 + (v - 0.5) * 2 * 30);
-        p[i] = r; p[i + 1] = gg; p[i + 2] = 90; p[i + 3] = 170;
+      const g = cv?.getContext('2d');
+      if (!cv || !g) return;
+      const step = 3;
+      const cw = Math.ceil(w / step), ch = Math.ceil(h / step);
+      cv.width = cw; cv.height = ch;
+      const img = g.createImageData(cw, ch);
+      const dm = Math.max(view.res * step, 20);
+      const lx = -0.5, ly = 0.6, lz = 0.62;
+      for (let j = 0; j < ch; j++) {
+        for (let i = 0; i < cw; i++) {
+          const x = view.c.x + (i * step - w / 2) * view.res, y = view.c.y - (j * step - h / 2) * view.res;
+          const hx = data.terrain.heightAt({ x: x + dm, y }) - data.terrain.heightAt({ x: x - dm, y });
+          const hy = data.terrain.heightAt({ x, y: y + dm }) - data.terrain.heightAt({ x, y: y - dm });
+          const k = (i + j * cw) * 4;
+          if (!Number.isFinite(hx) || !Number.isFinite(hy)) { img.data[k + 3] = 0; continue; }
+          const nx = -hx / (2 * dm), ny = -hy / (2 * dm);
+          const s = Math.max(0, (nx * lx + ny * ly + lz) / Math.hypot(nx, ny, 1));
+          const v = Math.round(30 + 180 * s);
+          img.data[k] = v; img.data[k + 1] = v; img.data[k + 2] = v + 4; img.data[k + 3] = 255;
+        }
       }
-      g.putImageData(d, 0, 0);
-    };
-    img.src = src;
-  }, [src, psr, mode]);
-  return <canvas ref={ref} className="tile" width={256} height={256} style={style} />;
+      g.putImageData(img, 0, 0);
+    }, 60);
+    return () => clearTimeout(id);
+  }, [data, view, w, h]);
+  return <canvas ref={ref} className="hillshade" style={{ width: w, height: h }} aria-hidden="true" />;
 }
 
-export function MoonMap({ data, site, onPick, dispersion, highlight = [], markers = [], suggestion, height = 560, showLegend, suitMonth, initialRes = 120, tour }: Props) {
-  const t = useT();
-  const layers = usePlanner((s) => s.layers);
-  const box = useRef<HTMLDivElement>(null);
-  const [w, setW] = useState(800);
-  const siteXY = useMemo(() => toXY(site), [site]);
-  const [view, setView] = useState<{ c: XY; res: number }>({ c: siteXY, res: initialRes });
-  const lang = usePlanner((s) => s.lang);
-  const drag = useRef<{ x: number; y: number; c: XY; moved: boolean } | null>(null);
+function niceDistance(m: number): number {
+  const p = 10 ** Math.floor(Math.log10(m));
+  const k = m / p;
+  return (k >= 5 ? 5 : k >= 2 ? 2 : 1) * p;
+}
 
-  useEffect(() => {
+interface Props {
+  readonly data: PlannerData;
+  readonly site: LatLon;
+  readonly onPick: (p: LatLon) => void;
+  /** Ellipse mode: draw the landing ellipse and start zoomed in to a few hundred metres. */
+  readonly dispersion?: Dispersion;
+  /** Site mode: "YYYY-MM" of the Sun & Earth colour layer (toggled by the layers button). */
+  readonly suitMonth?: string;
+}
+
+export function MoonMap({ data, site, onPick, dispersion, suitMonth }: Props) {
+  const t = useT();
+  const lang = usePlanner((s) => s.lang);
+  const suitOn = usePlanner((s) => s.suitLayer);
+  const set = usePlanner((s) => s.set);
+  const box = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  const siteXY = useMemo(() => toXY(site), [site]);
+  const ellipse = !!dispersion;
+  const [view, setView] = useState<View>({ c: siteXY, res: ellipse ? 2 : 150 });
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const gesture = useRef<{ moved: boolean; x: number; y: number; c: XY; dist: number; res: number } | null>(null);
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+
+  useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setW(el.clientWidth));
+    const read = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+    read();
+    const ro = new ResizeObserver(read);
     ro.observe(el);
-    setW(el.clientWidth);
     return () => ro.disconnect();
   }, []);
 
-  const h = height;
-  // Recentre when the site changes from outside the map (lists, inputs) and is no longer comfortably in view.
+  // Ellipse mode: frame the ellipse once the map has a size (a few hundred metres across).
+  const framed = useRef(false);
+  useLayoutEffect(() => {
+    if (!ellipse || framed.current || !size.w) return;
+    framed.current = true;
+    const axis = Math.max(dispersion!.northM + dispersion!.southM, dispersion!.eastM + dispersion!.westM);
+    // Not finer than about half the NAC pixel (2.09 m at z12), so the image is never stretched more than 2x.
+    setView({ c: siteXY, res: Math.max(1.05, Math.max(400, axis * 3.5) / Math.min(size.w, size.h)) });
+  }, [ellipse, size.w, size.h, dispersion, siteXY]);
+
+  const { w, h } = size;
+  // Recentre when the site changes from outside the map and leaves the comfortable middle of the view.
   const [lastSite, setLastSite] = useState(siteXY);
   if (lastSite !== siteXY) {
     setLastSite(siteXY);
     const sx = (siteXY.x - view.c.x) / view.res, sy = (view.c.y - siteXY.y) / view.res;
-    if (Math.abs(sx) > w * 0.38 || Math.abs(sy) > h * 0.38) setView((v) => ({ ...v, c: siteXY }));
+    if (Math.abs(sx) > w * 0.36 || Math.abs(sy) > h * 0.36) setView((v) => ({ ...v, c: siteXY }));
   }
-  const z = Math.max(0, Math.ceil(Math.log2(RES0 / view.res)));
+
+  const z = Math.max(0, Math.ceil(Math.log2((RES0 * dpr) / view.res) - 0.15));
   const toScreen = (q: XY) => ({ x: (q.x - view.c.x) / view.res + w / 2, y: (view.c.y - q.y) / view.res + h / 2 });
   const toWorld = (sx: number, sy: number): XY => ({ x: view.c.x + (sx - w / 2) * view.res, y: view.c.y - (sy - h / 2) * view.res });
 
-  const zoomAt = (factor: number, sx = w / 2, sy = h / 2) => {
-    setView((v) => {
-      const res = Math.min(2000, Math.max(1.5, v.res * factor));
-      const wx = v.c.x + (sx - w / 2) * v.res, wy = v.c.y - (sy - h / 2) * v.res;
-      return { res, c: { x: wx - (sx - w / 2) * res, y: wy + (sy - h / 2) * res } };
-    });
-  };
+  const zoomAt = (factor: number, sx = w / 2, sy = h / 2) => setView((v) => {
+    const res = Math.min(MAX_RES, Math.max(MIN_RES, v.res * factor));
+    const wx = v.c.x + (sx - w / 2) * v.res, wy = v.c.y - (sy - h / 2) * v.res;
+    return { res, c: { x: wx - (sx - w / 2) * res, y: wy + (sy - h / 2) * res } };
+  });
 
   useEffect(() => {
     const el = box.current;
@@ -155,26 +186,54 @@ export function MoonMap({ data, site, onPick, dispersion, highlight = [], marker
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const r = el.getBoundingClientRect();
-      zoomAt(e.deltaY > 0 ? 1.25 : 0.8, e.clientX - r.left, e.clientY - r.top);
+      zoomAt(Math.exp(Math.max(-1, Math.min(1, e.deltaY / 300))), e.clientX - r.left, e.clientY - r.top);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   });
 
-  const down = (e: RPE) => { drag.current = { x: e.clientX, y: e.clientY, c: view.c, moved: false }; (e.target as Element).setPointerCapture?.(e.pointerId); };
+  const local = (e: RPE) => { const r = box.current!.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const twoFinger = () => {
+    const [a, b] = [...pointers.current.values()];
+    return a && b ? { d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 } : null;
+  };
+  const down = (e: RPE) => {
+    if ((e.target as Element).closest('button')) return;
+    box.current?.setPointerCapture?.(e.pointerId);
+    const p = local(e);
+    pointers.current.set(e.pointerId, p);
+    const two = twoFinger();
+    gesture.current = { moved: pointers.current.size > 1, x: two?.mx ?? p.x, y: two?.my ?? p.y, c: view.c, dist: two?.d ?? 0, res: view.res };
+  };
   const move = (e: RPE) => {
-    const d = drag.current;
-    if (!d) return;
-    const dx = e.clientX - d.x, dy = e.clientY - d.y;
-    if (Math.hypot(dx, dy) > 4) d.moved = true;
-    if (d.moved) setView((v) => ({ ...v, c: { x: d.c.x - dx * v.res, y: d.c.y + dy * v.res } }));
+    const g = gesture.current;
+    if (!g || !pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, local(e));
+    const two = twoFinger();
+    if (two && g.dist > 0) {
+      g.moved = true;
+      const res = Math.min(MAX_RES, Math.max(MIN_RES, g.res * (g.dist / Math.max(1, two.d))));
+      const wx = g.c.x + (g.x - w / 2) * g.res, wy = g.c.y - (g.y - h / 2) * g.res;
+      setView({ res, c: { x: wx - (two.mx - w / 2) * res, y: wy + (two.my - h / 2) * res } });
+      return;
+    }
+    const p = local(e);
+    const dx = p.x - g.x, dy = p.y - g.y;
+    if (Math.hypot(dx, dy) > 5) g.moved = true;
+    if (g.moved) setView((v) => ({ ...v, c: { x: g.c.x - dx * v.res, y: g.c.y + dy * v.res } }));
   };
   const up = (e: RPE) => {
-    const d = drag.current;
-    drag.current = null;
-    if (d && !d.moved && onPick) {
-      const r = box.current!.getBoundingClientRect();
-      const p = toLatLon(toWorld(e.clientX - r.left, e.clientY - r.top));
+    const g = gesture.current;
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size > 0) {
+      // one finger left after a pinch: continue as a pan from here
+      const [p] = [...pointers.current.values()];
+      gesture.current = { moved: true, x: p!.x, y: p!.y, c: view.c, dist: 0, res: view.res };
+      return;
+    }
+    gesture.current = null;
+    if (g && !g.moved && e.type === 'pointerup') {
+      const p = toLatLon(toWorld(local(e).x, local(e).y));
       if (p.lat <= data.terrain.minLatDeg) onPick(p);
     }
   };
@@ -182,7 +241,7 @@ export function MoonMap({ data, site, onPick, dispersion, highlight = [], marker
   const zone = useMemo(() => {
     if (!dispersion) return '';
     const pts: string[] = [];
-    for (let a = 0; a < 360; a += 6) {
+    for (let a = 0; a < 360; a += 4) {
       const q = toScreen(offset(siteXY, a, radiusTowards(dispersion, a)));
       pts.push(`${q.x.toFixed(1)},${q.y.toFixed(1)}`);
     }
@@ -190,96 +249,42 @@ export function MoonMap({ data, site, onPick, dispersion, highlight = [], marker
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispersion, siteXY, view, w, h]);
 
-  const names = data.names.filter((n) => n.lat <= -74.5 && ((n.diameterKm * 1000) / view.res > 36 || highlight.includes(n.name)));
   const s = toScreen(siteXY);
   const suit = data.suit;
-  const suitImg = (() => {
-    if (!layers.suit || !suit || !suitMonth || !suit.months.includes(suitMonth)) return null;
-    const tl = toScreen({ x: -suit.extentM, y: suit.extentM });
-    const size = (2 * suit.extentM) / view.res;
-    return <image href={`${DATA}suit/${suitMonth}.png`} x={tl.x} y={tl.y} width={size} height={size} preserveAspectRatio="none" className="suit-img" />;
-  })();
-
-  const grid = useMemo(() => {
-    if (!layers.grid) return null;
-    const els = [];
-    for (let lat = -89; lat >= Math.round(data.terrain.minLatDeg); lat--) {
-      const r = Math.hypot(toXY({ lat, lon: 0 }).x, toXY({ lat, lon: 0 }).y) / view.res;
-      const o = toScreen({ x: 0, y: 0 });
-      els.push(<circle key={`lat${lat}`} cx={o.x} cy={o.y} r={r} className="grat" />);
-      if (lat % 2 === 0) els.push(<text key={`lt${lat}`} x={o.x + 4} y={o.y - r - 3} className="grat-l">{`${-lat}°S`}</text>);
-    }
-    for (let lon = -180; lon < 180; lon += 30) {
-      const a = toScreen({ x: 0, y: 0 }), b = toScreen(toXY({ lat: data.terrain.minLatDeg, lon }));
-      els.push(<line key={`lon${lon}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="grat" />);
-    }
-    return els;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layers.grid, view, w, h]);
+  const showSuit = !ellipse && suitOn && suit && suitMonth && suit.months.includes(suitMonth);
+  const tl = suit ? toScreen({ x: -suit.extentM, y: suit.extentM }) : { x: 0, y: 0 };
+  const scaleM = niceDistance(view.res * 110);
+  const ready = w > 0 && h > 0;
 
   return (
-    <div className="map" data-tour={tour} ref={box} style={{ height: h }} onPointerDown={down} onPointerMove={move} onPointerUp={up} role="application" aria-label={t('tapMap')}>
-      <Tiles layer={BASE} z={z} view={view} w={w} h={h} />
-      {layers.detail && view.res < 600 ? <Tiles layer={NAC} z={z} view={view} w={w} h={h} /> : null}
-      {layers.earth ? <Tiles layer={EARTH} z={z} view={view} w={w} h={h} /> : null}
-      {layers.psr ? <Tiles layer={PSR_TILES} z={z} view={view} w={w} h={h} /> : null}
-      <svg className="map-svg" width={w} height={h}>
-        {suitImg}
-        {grid}
-        {data.vectors.artemis3.features.map((f) => {
-              const pts = f.rings[0]!.map(([x, y]) => toScreen({ x: x!, y: y! }));
-              const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length, cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
-              return (
-                <g key={f.label}>
-                  <polygon points={pts.map((p) => `${p.x},${p.y}`).join(' ')} className="a3" />
-                  <text x={cx} y={cy} className="a3-l" textAnchor="middle">{f.label}</text>
-                </g>
-              );
-            })}
-        {names.map((n) => {
-          const q = toScreen(toXY(n));
-          const on = highlight.includes(n.name);
-          return (
-            <g key={n.name} className={on ? 'nm on' : 'nm'}>
-              {on ? <circle cx={q.x} cy={q.y} r={Math.max(10, (n.diameterKm * 500) / view.res)} className="nm-ring" /> : null}
-              <text x={q.x} y={q.y} textAnchor="middle" dominantBaseline="middle">{n.name}</text>
-            </g>
-          );
-        })}
-        {zone ? <polygon points={zone} className="zone" /> : null}
-        {suggestion ? (() => { const q = toScreen(suggestion); return <g><line x1={s.x} y1={s.y} x2={q.x} y2={q.y} className="sugg" /><circle cx={q.x} cy={q.y} r={7} className="sugg-pt" /></g>; })() : null}
-        {markers.map((m) => {
-          const q = toScreen(toXY(m.at));
-          return (
-            <g key={m.id} className={`mk ${m.tone}`} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => { e.stopPropagation(); m.onClick?.(); }} style={{ cursor: m.onClick ? 'pointer' : 'default' }}>
-              <circle cx={q.x} cy={q.y} r={14} />
-              <text x={q.x} y={q.y} textAnchor="middle" dominantBaseline="central">{m.label}</text>
-            </g>
-          );
-        })}
-        <g className="pin" transform={`translate(${s.x},${s.y})`}>
-          <circle r={10} />
-          <circle r={3.5} className="pin-c" />
-        </g>
-      </svg>
-      <div className="map-ctrl">
-        <button type="button" onPointerDown={(e) => e.stopPropagation()} onClick={() => zoomAt(0.5)} aria-label="+">+</button>
-        <button type="button" onPointerDown={(e) => e.stopPropagation()} onClick={() => zoomAt(2)} aria-label="−">−</button>
-        <button type="button" onPointerDown={(e) => e.stopPropagation()} onClick={() => setView((v) => ({ ...v, c: siteXY }))} aria-label="◎">◎</button>
+    <div className={ellipse ? 'map tall' : 'map'} dir="ltr" ref={box} role="application" aria-label={t(ellipse ? 'map.labelEllipse' : 'map.label')}
+      onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
+      {ready ? (
+        <>
+          <Tiles layer={WAC} z={z - 1} view={view} w={w} h={h} pad={0} />
+          <Tiles layer={WAC} z={z} view={view} w={w} h={h} pad={1} />
+          {view.res < 150 ? <Hillshade data={data} view={view} w={w} h={h} /> : null}
+          {view.res < 600 ? <><Tiles layer={NAC} z={z - 1} view={view} w={w} h={h} pad={0} /><Tiles layer={NAC} z={z} view={view} w={w} h={h} pad={1} /></> : null}
+          <svg className="map-svg" width={w} height={h}>
+            {showSuit ? <image href={`${DATA}suit/${suitMonth}.png`} x={tl.x} y={tl.y} width={(2 * suit.extentM) / view.res} height={(2 * suit.extentM) / view.res} preserveAspectRatio="none" className="suit-img" /> : null}
+            {zone ? <polygon points={zone} className="zone" /> : null}
+            <g className="pin" transform={`translate(${s.x},${s.y})`}><circle r={ellipse ? 5 : 9} /><circle r={ellipse ? 2 : 3.5} className="pin-c" /></g>
+          </svg>
+        </>
+      ) : null}
+      <div className="map-ctl">
+        <button type="button" className="map-btn" aria-label={t('map.zoomIn')} onClick={() => zoomAt(0.5)}><Icon name="plus" /></button>
+        <button type="button" className="map-btn" aria-label={t('map.zoomOut')} onClick={() => zoomAt(2)}><Icon name="minus" /></button>
+        {!ellipse ? <button type="button" className="map-btn" aria-pressed={suitOn} aria-label={t('map.layer')} onClick={() => set({ suitLayer: !suitOn })}><Icon name="layers" /></button> : null}
       </div>
-      <div className="map-scale" dir="ltr">{scaleLabel(view.res)}</div>
-      {showLegend && suitImg ? (
-        <div className="map-legend suit" data-tour="map-legend">
-          <span className="sw good" />{t('suitGood')}<span className="sw mid" />{t('suitMid')}<span className="sw bad" />{t('suitBad')}
-          {suitMonth ? <em>· {t('guideMonth', { m: `${monthName(Number(suitMonth.slice(5)) - 1, lang)} ${suitMonth.slice(0, 4)}` })}</em> : null}
+      {showSuit ? (
+        <div className="map-legend" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+          <span><i className="sw good" />{t('map.legendGood')}</span>
+          <span><i className="sw bad" />{t('map.legendBad')}</span>
         </div>
-      ) : showLegend && layers.earth ? <div className="map-legend"><span className="lg-bar" />{t('legendEarth')}</div> : null}
-      <div className="map-credit" dir="ltr">NASA Moon Trek · LRO WAC/NAC</div>
+      ) : null}
+      <div className="map-scale"><i style={{ width: scaleM / view.res }} /><span>{fmtKm(lang, scaleM)}</span></div>
+      <div className="map-credit">{t('map.credit')}</div>
     </div>
   );
-}
-
-function scaleLabel(res: number): string {
-  const m = res * 100;
-  return m >= 1000 ? `▬ ${(m / 1000).toFixed(m >= 10_000 ? 0 : 1)} km` : `▬ ${Math.round(m)} m`;
 }

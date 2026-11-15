@@ -1,23 +1,15 @@
 /**
- * Act I — the Journey (chapter 04). DOM scenes scroll over one fixed canvas. Three.js / GSAP / Lenis load lazily
- * (runtime.ts). With reduced motion or no WebGL the same scenes render as plain sections with a static Moon (04 §8).
+ * The opening: two hook pages over a living Moon. First paint is a CSS poster of the NASA SVS colour map placed
+ * exactly like the Moon (pose.ts); Three.js loads after first paint and fades in over it. With reduced motion or no
+ * WebGL the poster stays, without animation.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { loadEphemerisFile, type VectorLayers } from '../data/data';
-import type { Analysis } from '../hooks/useAnalysis';
-import type { EphemerisFile, } from '../planner/ephemeris';
-import { SeriesChart } from '../planner-ui/charts';
-import { Icon, Skeleton } from '../planner-ui/widgets';
-import { fmtDateTime, fmtNum } from '../state/format';
-import { useT, type Key } from '../state/i18n';
-import { usePlanner } from '../state/store';
-import { JOURNEY_DATE } from './keyframes';
-import type { Runtime } from './runtime';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useT } from '../i18n';
+import { usePlanner, type Page } from '../state/store';
+import { PAGE_MS, poseFor, sunOnScreen, SPIN_DEG_S, type Pose } from './pose';
+import type { MoonHandle } from './moon';
 
 const BASE = import.meta.env.BASE_URL;
-/** Scene heights (vh) proportional to the keyframe ranges over 800 vh of scroll + the last viewport. */
-const HEIGHTS = [96, 168, 120, 160, 144, 212];
-const SCENE_KEYS: readonly Key[] = ['scene.1', 'scene.2', 'scene.3', 'scene.4', 'scene.5', 'scene.6'];
 
 function webglOk(): boolean {
   try {
@@ -26,183 +18,96 @@ function webglOk(): boolean {
   } catch { return false; }
 }
 
-interface Counts { rows: number; artemis: number; psr: number; resM: number }
-
-export function Journey({ a, onPlanner }: { a: Analysis | null; onPlanner: () => void }) {
-  const t = useT();
-  const lang = usePlanner((s) => s.lang);
-  const site = usePlanner((s) => s.site);
-  const minEarth = usePlanner((s) => s.limits.minEarthElDeg);
-  const root = useRef<HTMLDivElement>(null);
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const counterRef = useRef<HTMLSpanElement>(null);
-  const ticksRef = useRef<HTMLSpanElement>(null);
-  const labelBox = useRef<HTMLDivElement>(null);
-  const rt = useRef<Runtime | null>(null);
-  const [staticMode, setStaticMode] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches || !webglOk());
-  const [glReady, setGlReady] = useState(false);
-  const [counting, setCounting] = useState(false);
-  const [eph, setEph] = useState<EphemerisFile | null>(null);
-  const [vectors, setVectors] = useState<VectorLayers | null>(null);
-  const [resM, setResM] = useState<number | null>(null);
-
+function useViewport(): { w: number; h: number } {
+  const [v, setV] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }));
   useEffect(() => {
-    loadEphemerisFile().then(setEph, () => undefined);
-    fetch(`${BASE}data/moontrek_vectors.json`).then((r) => r.json()).then(setVectors, () => undefined);
-    fetch(`${BASE}data/dem40/meta.json`).then((r) => r.json()).then((m: { mapScaleM: number }) => setResM(m.mapScaleM), () => undefined);
+    const on = () => setV({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', on);
+    return () => window.removeEventListener('resize', on);
   }, []);
+  return v;
+}
 
-  const counts: Counts | null = eph && vectors && resM ? { rows: eph.count, artemis: vectors.artemis3.features.length, psr: vectors.psr.features.length, resM } : null;
+/** Poster disc: the colour map in a circle, centred on the facing longitude, shaded toward the Horizons Sun. */
+function posterStyle(p: Pose, spin: boolean): CSSProperties {
+  const u0 = 0.5 + p.lon / 360;
+  const v0 = 0.5 - p.lat / 180;
+  const s = sunOnScreen(p);
+  const hx = 50 + s[0] * 34, hy = 50 - s[1] * 34;
+  return {
+    left: p.x - p.d / 2, top: p.y - p.d / 2, width: p.d, height: p.d,
+    backgroundSize: `${2 * p.d}px ${p.d}px`,
+    backgroundPosition: `${p.d / 2 - u0 * 2 * p.d}px ${p.d / 2 - v0 * p.d}px`,
+    '--shade': `radial-gradient(circle at ${hx}% ${hy}%, rgba(7,10,16,0) 28%, rgba(7,10,16,.55) 58%, rgba(7,10,16,.97) 78%)`,
+    '--spin-to': `${p.d / 2 - u0 * 2 * p.d + 2 * p.d}px`,
+    '--spin-s': `${360 / SPIN_DEG_S}s`,
+    animationPlayState: spin ? 'running' : 'paused',
+  } as CSSProperties;
+}
 
-  // Start the animated runtime once the lighting (ephemeris) and vectors are here.
+export function MoonLayer() {
+  const t = useT();
+  const page = usePlanner((s) => s.page);
+  const lang = usePlanner((s) => s.lang);
+  const rtl = lang === 'ar';
+  const { w, h } = useViewport();
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const moon = useRef<MoonHandle | null>(null);
+  const [motion] = useState(() => !window.matchMedia('(prefers-reduced-motion: reduce)').matches && webglOk());
+  const [glReady, setGlReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+  // The canvas lives only while a hook page is shown (it is disposed under the planner).
+  const [covered, setCovered] = useState(page === 2);
   useEffect(() => {
-    if (staticMode || !eph || !vectors || !root.current || !canvas.current) return;
+    const id = setTimeout(() => setCovered(page === 2), page === 2 ? PAGE_MS + 50 : 0);
+    return () => clearTimeout(id);
+  }, [page]);
+
+  const live = motion && !failed && !covered;
+  const hookPage: 0 | 1 = page === 0 ? 0 : 1;
+  const pageRef = useRef(hookPage);
+  useEffect(() => { pageRef.current = hookPage; moon.current?.setPage(hookPage); }, [hookPage]);
+
+  useEffect(() => {
+    if (!live || !canvas.current) return;
     let alive = true;
-    let local: Runtime | null = null;
-    import('./runtime').then(({ startJourney }) => {
-      if (!alive || !root.current || !canvas.current) return;
-      local = startJourney({
-        root: root.current, canvas: canvas.current, rtl: lang === 'ar', eph, vectors,
-        labels: Array.from(labelBox.current?.children ?? []) as HTMLElement[],
-        onProgress: (p, s) => {
-          if (counterRef.current) counterRef.current.textContent = `${String(s + 1).padStart(3, '0')} / 006 · ${t(SCENE_KEYS[s]!).toUpperCase()}`;
-          if (ticksRef.current) ticksRef.current.style.setProperty('--p', p.toFixed(4));
-        },
-        onCount: () => setCounting(true),
-        onReady: () => setGlReady(true),
-        onFail: () => setStaticMode(true),
+    let handle: MoonHandle | null = null;
+    const cores = navigator.hardwareConcurrency ?? 4;
+    const small = Math.min(window.innerWidth, window.innerHeight) < 600;
+    import('./moon').then(({ createMoon }) => {
+      if (!alive || !canvas.current) return;
+      handle = createMoon({
+        canvas: canvas.current, rtl, page: pageRef.current, low: small || cores <= 4, hi: !small && cores >= 8,
+        onReady: () => alive && setGlReady(true), onFail: () => alive && setFailed(true),
       });
-      rt.current = local;
-    }, () => setStaticMode(true));
-    return () => { alive = false; local?.dispose(); rt.current = null; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [staticMode, eph, vectors, lang]);
+      moon.current = handle;
+    }, () => alive && setFailed(true));
+    return () => { alive = false; handle?.dispose(); moon.current = null; setGlReady(false); };
+  }, [live, rtl]);
 
-  // Panels appear when the analysis arrives: re-bind their draw triggers.
-  const m = a && !('kind' in a.mission) ? a.mission : null;
-  useEffect(() => { rt.current?.refreshCharts(); }, [m]);
-
-  const go = (sel: string) => {
-    const el = root.current?.querySelector<HTMLElement>(sel);
-    if (!el) return;
-    if (rt.current) rt.current.scrollTo(el); else el.scrollIntoView({ behavior: staticMode ? 'auto' : 'smooth' });
-  };
-  const siteLabel = `${site.lat.toFixed(3)}°, ${site.lon.toFixed(3)}°`;
-  const journeyDate = useMemo(() => `${fmtDateTime(Date.parse(JOURNEY_DATE), lang, 'utc')} UTC`, [lang]);
-  const panels: [Key, Key, 'sun' | 'earth' | 'soc', Record<string, string>?][] = [
-    ['journey.panelA', 'journey.panelA.cap', 'sun', { s: siteLabel }],
-    ['journey.panelB', 'journey.panelB.cap', 'earth'],
-    ['journey.panelC', 'journey.panelC.cap', 'soc'],
-  ];
-
+  const pose = poseFor(hookPage, w, h, rtl);
   return (
-    <div className={staticMode ? 'journey static' : 'journey'} ref={root}>
-      {!staticMode ? <canvas className="j-canvas" ref={canvas} aria-hidden="true" /> : null}
-      <div className={glReady && !staticMode ? 'j-poster gone' : 'j-poster'} aria-hidden="true" style={{ backgroundImage: `url(${BASE}data/moon/color_2k.webp)` }} />
-      {!staticMode ? <div className="j-labels" ref={labelBox} aria-hidden="true">{(vectors?.artemis3.features ?? []).map((f) => <span key={f.label} className="j-label mono">{f.label}</span>)}</div> : null}
-
-      <div className="j-hud" aria-hidden={staticMode}>
-        <span className="hud-scroll mono"><i />{t('hud.scroll')}</span>
-        <span className="hud-src mono">
-          <a href="https://svs.gsfc.nasa.gov/4720/" target="_blank" rel="noreferrer">{t('hud.surfaceSource')}</a>
-          <span>{t('hud.sunSource', { d: journeyDate })} · {t('hud.earthshine')}</span>
-        </span>
-        <span className="hud-count mono"><span ref={counterRef}>001 / 006 · {t('scene.1').toUpperCase()}</span><span className="ticks" ref={ticksRef} /></span>
-      </div>
-      <nav className="j-dots" aria-label="scenes">
-        {SCENE_KEYS.map((k, i) => <button key={k} type="button" aria-label={t(k)} onClick={() => go(`[data-scene="${i + 1}"]`)} />)}
-      </nav>
-
-      <section data-scene="1" className="scene s1" style={{ '--h': `${HEIGHTS[0]}vh` } as React.CSSProperties}>
-        <div className="scene-in">
-          <div className="copy">
-            <h1 className="display reveal">{t('journey.s1.title')}</h1>
-            <p className="lede reveal">{t('journey.s1.sub')}</p>
-            <div className="cta-row reveal">
-              <button type="button" className="btn-primary" onClick={() => go('[data-scene="2"]')}><span>{t('journey.s1.cta')}</span><Icon name="arrow" size={18} className="flip-rtl" /></button>
-              <button type="button" className="btn-text" onClick={onPlanner}>{t('skip.toPlanner')}</button>
-            </div>
-          </div>
-          {staticMode ? <div className="static-moon" style={{ backgroundImage: `url(${BASE}data/moon/color_2k.webp)` }} role="img" aria-label={t('hud.surfaceSource')} /> : null}
-        </div>
-      </section>
-
-      <section data-scene="2" className="scene s2" style={{ '--h': `${HEIGHTS[1]}vh` } as React.CSSProperties}>
-        <div className="scene-in">
-          <div className="copy">
-            <p className="eyebrow mono reveal">{t('journey.s2.title')}</p>
-            <div className="counters">
-              {counts ? ([[counts.rows, 'journey.c1', 'NASA JPL Horizons'], [counts.artemis, 'journey.c2', 'NASA Moon Trek'], [counts.psr, 'journey.c3', 'NASA Moon Trek'], [counts.resM, 'journey.c4', 'NASA PDS LRO LOLA']] as const).map(([v, k, src], i) => (
-                <div className="counter reveal" key={k} style={{ '--i': i } as React.CSSProperties}>
-                  <Ticker value={v} run={counting || staticMode} />
-                  <span className="c-cap">{t(k)}</span>
-                  <span className="c-src mono">{src}</span>
-                </div>
-              )) : <Skeleton label={t('journey.loadingData')} />}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section data-scene="3" className="scene s3" style={{ '--h': `${HEIGHTS[2]}vh` } as React.CSSProperties}>
-        <div className="scene-in">
-          <div className="copy">
-            <h2 className="display md reveal">{t('journey.s3.title')}</h2>
-            <p className="lede reveal">{t('journey.s3.body')}</p>
-          </div>
-        </div>
-      </section>
-
-      <section data-scene="4" className="scene s4" style={{ '--h': `${HEIGHTS[3]}vh` } as React.CSSProperties}>
-        <div className="scene-in">
-          <p className="eyebrow mono">{t('journey.s4.title')}</p>
-          <div className="panels">
-            {panels.map(([title, cap, kind, vars]) => (
-              <article className="glass panel" key={kind} data-panel>
-                <h3>{t(title)}</h3>
-                {m ? <SeriesChart m={m} kind={kind} draw={!staticMode} height={150} minEarth={minEarth} /> : <Skeleton label={t('journey.loadingData')} />}
-                <p className="cap mono">{t(cap, vars)}</p>
-              </article>
-            ))}
-          </div>
-          <p className="closing reveal">{t('journey.s4.closing')}</p>
-        </div>
-      </section>
-
-      <section data-scene="5" className="scene s5" style={{ '--h': `${HEIGHTS[4]}vh` } as React.CSSProperties}>
-        <div className="scene-in">
-          <div className="copy">
-            <h2 className="display md reveal">{t('journey.s5.title')}</h2>
-            <p className="lede reveal">{t('journey.s5.body')}</p>
-            <p className="cap mono reveal">{t('hud.poleSource')}</p>
-          </div>
-        </div>
-      </section>
-
-      <section data-scene="6" className="scene s6" style={{ '--h': `${HEIGHTS[5]}vh` } as React.CSSProperties}>
-        <div className="scene-in">
-          <div className="handoff" data-reveal-circle style={staticMode ? undefined : { clipPath: 'circle(0% at 50% 50%)' }}>
-            <h2 className="display md">{t('journey.s6.title')}</h2>
-            <p className="lede">{t('journey.s6.body')}</p>
-            <button type="button" className="btn-primary" onClick={onPlanner}><span>{t('journey.s6.cta')}</span><Icon name="arrow" size={18} className="flip-rtl" /></button>
-          </div>
-        </div>
-      </section>
+    <div className={`moon-layer${covered ? ' covered' : ''}`} role="img" aria-label={t('hook.moon')}>
+      <div className={`moon-poster${glReady ? ' gone' : ''}${motion ? ' spin' : ''}`} style={{ ...posterStyle(pose, motion && !glReady), backgroundImage: `url(${BASE}data/moon/color_2k.webp)` }} />
+      {live ? <canvas ref={canvas} className={glReady ? 'moon-gl on' : 'moon-gl'} /> : null}
     </div>
   );
 }
 
-/** Digits roll up once (ticker) with a faint echo line below (04 §5, scene 2). Values come from the data files. */
-function Ticker({ value, run }: { value: number; run: boolean }) {
-  const s = fmtNum(value);
+export function HookPage({ n, active }: { n: 0 | 1; active: boolean }) {
+  const t = useT();
+  const set = usePlanner((s) => s.set);
+  const go = (p: Page) => set({ page: p });
   return (
-    <span className="ticker" aria-label={s} dir="ltr">
-      <span className="tk-row" aria-hidden="true">
-        {[...s].map((ch, i) => /\d/.test(ch)
-          ? <span className="tk-col" key={i}><span className="tk-strip" style={{ transform: `translateY(${run ? -Number(ch) * 10 : 0}%)`, transitionDelay: `${i * 0.12}s` }}>{'0123456789'.split('').map((d) => <span key={d}>{d}</span>)}</span></span>
-          : <span key={i}>{ch}</span>)}
-      </span>
-      <span className="tk-echo" aria-hidden="true">{run ? s : s.replace(/\d/g, '0')}</span>
-    </span>
+    <section className={`page hook hook-${n}`} inert={!active} aria-hidden={!active}>
+      <div className="hook-copy">
+        {n === 0 ? (
+          <>
+            <h1 className="display">{t('hook.1')}</h1>
+            <button type="button" className="btn-primary" onClick={() => go(2)}>{t('hook.start')}</button>
+          </>
+        ) : <h2 className="display">{t('hook.2')}</h2>}
+      </div>
+    </section>
   );
 }

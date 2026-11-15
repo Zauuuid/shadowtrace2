@@ -41,25 +41,11 @@
    "height": 2048
   },
   {
-   "name": "color_8k.webp",
-   "bytes": 3507364,
-   "sha256": "69fa90142fba79db42ac77011bfd66d840e385839d32890e45d7bb2ec387984c",
-   "width": 8192,
-   "height": 4096
-  },
-  {
    "name": "normal_2k.webp",
    "bytes": 809180,
    "sha256": "e01efeef5c6800a9edc83089c5649f44370fbf5cbadaed50c21665fb0a3d589c",
    "width": 2048,
    "height": 1024
-  },
-  {
-   "name": "normal_4k.webp",
-   "bytes": 2601392,
-   "sha256": "58cc06bdfd058f0afae2735a12c9a91f7a31c6d3bd304f5f085a3e95ef3d5075",
-   "width": 4096,
-   "height": 2048
   }
  ]
 }
